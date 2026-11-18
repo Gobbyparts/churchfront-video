@@ -298,6 +298,7 @@ final class VISCALink: PTZLink {
         var length: Int { switch self { case .panTilt: return 11; case .zoom, .shutter, .iris, .gain: return 7; default: return 4 } }
     }
     private var pending: [(kind: Inq, at: Date)] = []
+    private static let trace = ProcessInfo.processInfo.environment["CUEVIDEO_VISCATRACE"] != nil
     private let units = VISCAUnits.ptzOptics
     // The exposure being read, and the last one read.
     private var reading = CameraExposure()
@@ -469,9 +470,14 @@ final class VISCALink: PTZLink {
         while let end = rx.firstIndex(of: 0xFF) {
             let m = Array(rx[...end])
             rx.removeSubrange(...end)
+            if Self.trace { print("VISCATRACE \(camera.host) got \(m.map { String(format: "%02x", $0) }.joined(separator: " ")) waiting \(pending.map { "\($0.kind)" })"); fflush(stdout) }
             guard m.count >= 3, m[1] == 0x50 || m[1] == 0x60, !pending.isEmpty else { continue }
-            // A refusal: of the oldest inquiry, as far as anyone can tell.
-            guard m[1] == 0x50 else { pending.removeFirst(); continue }
+            // A refusal: of the oldest inquiry, as far as anyone can tell. If that was the color
+            // temperature, the exposure read still ends there.
+            guard m[1] == 0x50 else {
+                if pending.removeFirst().kind == .colorTemp { finishExposure() }
+                continue
+            }
             // The camera answers its lens and picture questions in the order asked, but pan
             // and tilt are a separate part of it and can answer before or after them. So an
             // answer goes to the oldest inquiry it has the right shape for.
@@ -499,20 +505,29 @@ final class VISCALink: PTZLink {
             case .iris: reading.value.iris = units.iris[low]
             case .gain: reading.value.gain = low
             case .wbMode:
-                reading.value.wb = [0x00: "auto", 0x01: "tungsten", 0x02: "daylight", 0x20: "kelvin"][low] ?? "custom"
+                reading.value.wb = [0x00: "auto", 0x01: "tungsten", 0x02: "daylight", 0x03: "one push", 0x20: "kelvin"][low] ?? "custom"
+                // Color temperature only means something in that mode, and some cameras
+                // (BirdDog) refuse the question; a refusal can come back ahead of answers still
+                // owed, which would put every later answer against the wrong question.
+                if low == 0x20 { ask(.colorTemp, [0x81, 0x09, 0x04, 0x20, 0xFF]) } else { finishExposure() }
             case .colorTemp:
                 reading.value.kelvin = min(units.kelvinTop, units.kelvinBase + low * units.kelvinStep)
-                reading.gainIsLevel = true
-                reading.hasAutoMode = true
-                reading.gainList = Array(0...units.gainMax)
-                reading.shutterList = units.shutter.values.sorted()
-                reading.irisList = units.iris.values.sorted()
-                reading.kelvinList = Array(stride(from: units.kelvinBase, through: units.kelvinTop, by: units.kelvinStep))
-                lastExposure = reading
-                onExposure?(reading)
+                finishExposure()
             }
         }
         if rx.count > 256 { rx.removeAll() }
+    }
+
+    /// The last answer of an exposure read is in: report it.
+    private func finishExposure() {
+        reading.gainIsLevel = true
+        reading.hasAutoMode = true
+        reading.gainList = Array(0...units.gainMax)
+        reading.shutterList = units.shutter.values.sorted()
+        reading.irisList = units.iris.values.sorted()
+        reading.kelvinList = Array(stride(from: units.kelvinBase, through: units.kelvinTop, by: units.kelvinStep))
+        lastExposure = reading
+        onExposure?(reading)
     }
 
     /// Gain, shutter, iris and white balance as they are now, reported through onExposure.
@@ -522,7 +537,6 @@ final class VISCALink: PTZLink {
         ask(.iris, [0x81, 0x09, 0x04, 0x4B, 0xFF])
         ask(.gain, [0x81, 0x09, 0x04, 0x4C, 0xFF])
         ask(.wbMode, [0x81, 0x09, 0x04, 0x35, 0xFF])
-        ask(.colorTemp, [0x81, 0x09, 0x04, 0x20, 0xFF])
     }
 
     func autoExposure() {
@@ -1047,6 +1061,12 @@ public final class PTZController: ObservableObject {
     /// horizontal angle of view in hundredths of a degree), on main; nil if it can't say.
     public func readPosition(camera: UUID, _ done: @escaping (PTZPosition?) -> Void) {
         with(camera) { $0.readPosition { p in DispatchQueue.main.async { done(p) } } }
+    }
+
+    /// Where a camera is in the units a shot keeps (a VISCA camera's own counts), so going to
+    /// it brings the camera back exactly. On main; nil if it can't say.
+    public func readShotPosition(camera: UUID, _ done: @escaping (PTZPosition?) -> Void) {
+        with(camera) { $0.readShotPosition { p in DispatchQueue.main.async { done(p) } } }
     }
 
     /// Pan and tilt for auto tracking: speeds -1 to 1, sent as given, without counting as a manual move.

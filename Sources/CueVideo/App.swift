@@ -140,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NDIMonitor.shared.start(src)
         }
         NDIMonitor.shared.scan()
-        if env["CUEVIDEO_FOLLOWTEST"] != nil { SelfTest.followTest() } else if let cams = env["CUEVIDEO_PTZTEST"] { SelfTest.ptzTest(cams) } else if env["CUEVIDEO_REALTEST"] != nil { SelfTest.realTest() } else if env["CUEVIDEO_PROBE"] != nil { SelfTest.probe() } else if env["CUEVIDEO_SELFTEST"] != nil { SelfTest.run() }
+        if env["CUEVIDEO_FOLLOWTEST"] != nil { SelfTest.followTest() } else if let cams = env["CUEVIDEO_PTZTEST"] { SelfTest.ptzTest(cams) } else if let cams = env["CUEVIDEO_VISCATEST"] { SelfTest.viscaTest(cams) } else if env["CUEVIDEO_REALTEST"] != nil { SelfTest.realTest() } else if env["CUEVIDEO_PROBE"] != nil { SelfTest.probe() } else if env["CUEVIDEO_SELFTEST"] != nil { SelfTest.run() }
     }
 
     /// Quitting stops every camera CueVideo is moving (auto tracking, the joystick, zoom, a

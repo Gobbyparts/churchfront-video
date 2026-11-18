@@ -161,6 +161,120 @@ enum SelfTest {
     /// CUEVIDEO_PTZTEST=ip,ip: adds those Canon cameras (not saved), then on each one waits for it,
     /// prints its model and presets, and nudges pan, tilt and zoom through the app's own controls.
     /// Record positions before and put them back after (Tools/canon_position.py).
+    /// CUEVIDEO_VISCATEST=ip,ip: VISCA over IP cameras (BirdDog, Sony). Notes where each camera
+    /// is, nudges pan, tilt and zoom (checking each one moved it), recalls preset 2, then drives
+    /// it back to where it started and checks it got there. The cameras move: only when
+    /// nothing is live. With "read:" before the list, it only reads position and exposure.
+    static func viscaTest(_ list: String) {
+        let ptz = Booth.shared.ptz
+        func log(_ s: String) { print("VISCA", s); fflush(stdout) }
+        let readOnly = list.hasPrefix("read:")
+        var cams: [PTZCamera] = []
+        for ip in list.dropFirst(readOnly ? 5 : 0).split(separator: ",") {
+            var c = PTZCamera(); c.name = String(ip); c.host = String(ip); c.proto = .sonyUDP; c.port = 52381
+            cams.append(c)
+        }
+        ptz.cameras = cams
+        var passed = 0, failed = 0
+        func check(_ ok: Bool, _ what: String) {
+            if ok { passed += 1 } else { failed += 1 }
+            log("\(ok ? "PASS" : "FAIL") \(what)")
+        }
+        func text(_ p: PTZPosition?) -> String { p.map { "pan \($0.pan) tilt \($0.tilt) zoom \($0.zoom)" } ?? "no answer" }
+        func exposure(_ c: PTZCamera) {
+            guard let e = ptz.exposure[c.id] else { return check(false, "\(c.host): reports exposure") }
+            check(true, "\(c.host): exposure \(e.gainAuto ? "auto" : "manual"), gain \(e.value.gain.map(String.init) ?? "?"), shutter \(e.value.shutter.map { "1/\($0)" } ?? "?"), iris \(e.value.iris.map(String.init) ?? "?"), white balance \(e.value.wb ?? "?")\(e.value.kelvin.map { " \($0) K" } ?? "")")
+        }
+        /// The camera's position once it stops moving (two readings alike), or the last one.
+        func settle(_ c: PTZCamera, _ limit: Double, _ done: @escaping (PTZPosition?) -> Void) {
+            var last: PTZPosition?, waited = 0.0
+            func poll() {
+                ptz.readShotPosition(camera: c.id) { p in
+                    if let p, p == last { return done(p) }
+                    last = p ?? last
+                    waited += 0.5
+                    if waited > limit { return done(last) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: poll)
+                }
+            }
+            poll()
+        }
+        func run(_ i: Int) {
+            guard i < cams.count else {
+                log("\(passed) passed, \(failed) failed")
+                ptz.cameras = []
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(failed == 0 ? 0 : 1) }
+                return
+            }
+            let c = cams[i], h = c.host
+            ptz.selected = c.id
+            var waited = 0.0
+            func ready() {
+                if ptz.online.contains(c.id) { begin() }
+                else if waited > 8 { check(false, "\(h): answers"); run(i + 1) }
+                else { waited += 0.25; DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: ready) }
+            }
+            func begin() {
+                ptz.refreshExposure(camera: c.id)
+                settle(c, 3) { start in
+                    guard let start else { check(false, "\(h): reads its position"); run(i + 1); return }
+                    log("\(h): starts at \(text(start))")
+                    if readOnly { exposure(c); run(i + 1); return }
+                    typealias Nudge = (name: String, go: () -> Void, stop: () -> Void, moved: (PTZPosition, PTZPosition) -> Int)
+                    let nudges: [Nudge] = [
+                        ("pan right", { ptz.drive(x: 0.4, y: 0, camera: c.id) }, { ptz.stopDrive(camera: c.id) }, { $1.pan - $0.pan }),
+                        ("pan left", { ptz.drive(x: -0.4, y: 0, camera: c.id) }, { ptz.stopDrive(camera: c.id) }, { $1.pan - $0.pan }),
+                        ("tilt up", { ptz.drive(x: 0, y: 0.4, camera: c.id) }, { ptz.stopDrive(camera: c.id) }, { $1.tilt - $0.tilt }),
+                        ("tilt down", { ptz.drive(x: 0, y: -0.4, camera: c.id) }, { ptz.stopDrive(camera: c.id) }, { $1.tilt - $0.tilt }),
+                        ("zoom in", { ptz.zoom(0.5, camera: c.id) }, { ptz.zoom(0, camera: c.id) }, { $1.zoom - $0.zoom }),
+                        ("zoom out", { ptz.zoom(-0.5, camera: c.id) }, { ptz.zoom(0, camera: c.id) }, { $1.zoom - $0.zoom }),
+                    ]
+                    func nudge(_ n: Int, from: PTZPosition) {
+                        guard n < nudges.count else { return preset(from) }
+                        let m = nudges[n]
+                        m.go()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            m.stop()
+                            settle(c, 4) { after in
+                                let d = after.map { m.moved(from, $0) } ?? 0
+                                check(d != 0, "\(h): \(m.name) moved it \(d > 0 ? "+" : "")\(d)")
+                                nudge(n + 1, from: after ?? from)
+                            }
+                        }
+                    }
+                    func preset(_ from: PTZPosition) {
+                        ptz.recall(2, camera: c.id)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            settle(c, 25) { p in
+                                check(p != nil && p != from, "\(h): preset 2 moved it to \(text(p))")
+                                back()
+                            }
+                        }
+                    }
+                    func back() {
+                        ptz.go(to: PTZShot(name: "start", start), camera: c.id)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            settle(c, 25) { p in
+                                let ok = p.map { abs($0.pan - start.pan) <= 2 && abs($0.tilt - start.tilt) <= 2 && abs($0.zoom - start.zoom) <= 32 } ?? false
+                                check(ok, "\(h): back where it started (\(text(p)))")
+                                exposure(c)
+                                run(i + 1)
+                            }
+                        }
+                    }
+                    nudge(0, from: start)
+                }
+            }
+            ready()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { run(0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 240) {
+            log("timed out")
+            for c in cams { ptz.stopDrive(camera: c.id); ptz.zoom(0, camera: c.id) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(1) }
+        }
+    }
+
     static func ptzTest(_ list: String) {
         let ptz = Booth.shared.ptz
         func log(_ s: String) { print("PTZ", s); fflush(stdout) }
