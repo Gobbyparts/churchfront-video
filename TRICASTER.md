@@ -96,6 +96,13 @@ Learned on the unit:
 - Building on this Mac (Command Line Tools, no Xcode): SwiftUI's macro plugin isn't in the
   tools, so build with `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`.
 
+Cameras: both P400s work as VISCA over IP (`sonyUDP`, 52381). `CUEVIDEO_VISCATEST` passes
+16 of 16 (pan, tilt, zoom, preset 2, back to the start within a count). App preset n is
+TriCaster preset n (`firstPreset` 0). Exposure reads in auto mode; the shutter and iris
+tables are PTZOptics' and don't fit the P400 yet (check in manual mode, which changes the
+picture). NDI names: `BIRDDOG-MAIN (MAIN CAM)`, `BIRDDOG-2ND (2ND CAM)`; the TriCaster sends
+`MINI-FB43EEC8 (MIX 1)` to `(MIX 4)`. Previews and tracking need NDI Tools on this Mac.
+
 ## Open questions
 
 - How to run a macro over the API (many macros are camera shots, such as "Main Josh Preaching").
