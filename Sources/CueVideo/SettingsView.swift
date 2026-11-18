@@ -572,8 +572,8 @@ enum StatusReport {
             }
         }()
         var rows: [(String, String)] = [
-            ("Connection", "\(link), \(b.atem.host.isEmpty ? "no address" : "\(b.atem.host) UDP 9910")"),
-            ("Model", s.product.isEmpty ? "Unknown until connected" : "\(s.product), protocol \(s.version)"),
+            ("Connection", "\(link), \(b.atem.host.isEmpty ? "no address" : b.atem.kind == .tricaster ? "\(b.atem.host) HTTP \(ATEMClient.triCasterPort)" : "\(b.atem.host) UDP 9910")"),
+            ("Model", s.product.isEmpty ? "Unknown until connected" : b.atem.kind == .tricaster ? "\(s.product), software \(s.version)" : "\(s.product), protocol \(s.version)"),
             ("Size", "\(s.meCount) M/E, \(s.keyerCount) keys, \(s.dskCount) DSKs, \(s.auxCount) aux, \(s.inputs.count) sources"),
             ("The operator runs", "M/E \(b.me + 1)"),
         ]

@@ -10,11 +10,15 @@ public struct ATEMInput: Identifiable, Hashable {
     public let id: Int
     public var long: String
     public var short: String
+    /// Set when the switcher says outright whether this source can go on a program or
+    /// preview bus (a TriCaster's M/Es can); otherwise it follows the ATEM numbering.
+    public var bus: Bool?
 
     /// Sources a program or preview bus can take: black, cameras and other
     /// inputs, bars, colors, media players and SuperSource.
     public var isBusSource: Bool {
-        id == 0 || (1...999).contains(id) || id == 1000 || id == 2001 || id == 2002
+        if let bus { return bus }
+        return id == 0 || (1...999).contains(id) || id == 1000 || id == 2001 || id == 2002
             || ((3000..<4000).contains(id) && id % 10 == 0) || (6000..<6100).contains(id)
     }
     /// Aux outputs can also take clean feeds and M/E program and preview.
@@ -119,10 +123,21 @@ public struct ATEMLogEntry: Identifiable {
     }
 }
 
+public enum SwitcherKind: Equatable {
+    case atem
+    case tricaster
+}
+
+/// The switcher: an ATEM over its own protocol, or a TriCaster (TriCaster.swift) when the
+/// address answers on the TriCaster's API port. Both fill the same state and take the same
+/// commands.
 public final class ATEMClient: ObservableObject {
     @Published public private(set) var state = ATEMState()
     @Published public private(set) var link: ATEMLink = .idle
     @Published public private(set) var host = ""
+    @Published public private(set) var kind: SwitcherKind = .atem
+    /// Where a TriCaster's API listens. Self-tests point it at a pretend TriCaster.
+    public static var triCasterPort: UInt16 = 5952
     /// Which end of the T-bar is at rest, per M/E. Flips when a transition
     /// finishes, as on a hardware panel.
     @Published public private(set) var tbarAtTop: [Int: Bool] = [:]
@@ -145,6 +160,11 @@ public final class ATEMClient: ObservableObject {
     private var timer: DispatchSourceTimer?
     private var s = ATEMState()
     private var lastPosition: [Int: Double] = [:]
+    /// The TriCaster connection, when the switcher is one. Only touched on the main thread.
+    private var tc: TriCasterLink?
+    /// Counts connect calls, so a slow TriCaster probe can't act for an old address.
+    private var generation = 0
+    private var lastProbe = 0.0
 
     private enum Flag {
         static let ackRequest: UInt8 = 0x01, newSession: UInt8 = 0x02, retransmit: UInt8 = 0x04
@@ -156,15 +176,34 @@ public final class ATEMClient: ObservableObject {
 
     // MARK: Connection
 
+    /// Connects to the switcher at this address. A TriCaster is tried first (its API answers
+    /// at once over HTTP); anything else is taken to be an ATEM.
     public func connect(_ host: String, port: UInt16 = 9910) {
         let h = host.trimmingCharacters(in: .whitespaces)
         self.host = h
         link = h.isEmpty ? .idle : .connecting
+        generation += 1
+        let g = generation
+        stopTriCaster()
+        queue.async {
+            self.target = ""
+            self.s = ATEMState()
+            self.publish()
+        }
+        guard !h.isEmpty else { return }
+        TriCasterLink.probe(h, port: Self.triCasterPort) { found in
+            DispatchQueue.main.async {
+                guard g == self.generation else { return }
+                if let found { self.startTriCaster(h, found) } else { self.startATEM(h, port: port) }
+            }
+        }
+    }
+
+    private func startATEM(_ h: String, port: UInt16) {
+        kind = .atem
         queue.async {
             self.target = h
             self.port = port
-            self.s = ATEMState()
-            self.publish()
             if self.timer == nil {
                 let t = DispatchSource.makeTimerSource(flags: .strict, queue: self.queue)
                 t.schedule(deadline: .now(), repeating: .milliseconds(20), leeway: .milliseconds(2))
@@ -172,13 +211,44 @@ public final class ATEMClient: ObservableObject {
                 t.resume()
                 self.timer = t
             }
-            if !h.isEmpty { self.open() }
+            self.open()
         }
+    }
+
+    private func startTriCaster(_ h: String, _ info: (product: String, version: String, frameRate: Double)) {
+        queue.async {
+            self.target = ""
+            self.timer?.cancel(); self.timer = nil
+            self.conn?.cancel(); self.conn = nil
+            self.connected = false; self.ready = false
+        }
+        let link = TriCasterLink(host: h, port: Self.triCasterPort)
+        link.onState = { [weak self] st in DispatchQueue.main.async { if self?.state != st { self?.state = st } } }
+        link.onLink = { [weak self, weak link] l in
+            DispatchQueue.main.async { if let self, self.tc === link, self.link != l { self.link = l } }
+        }
+        link.onLog = { [weak self] e in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.sentLog.append(e)
+                if self.sentLog.count > 60 { self.sentLog.removeFirst(self.sentLog.count - 60) }
+            }
+        }
+        tc = link
+        kind = .tricaster
+        link.start(product: info.product, version: info.version, frameRate: info.frameRate)
+    }
+
+    private func stopTriCaster() {
+        tc?.stop()
+        tc = nil
     }
 
     public func disconnect() {
         host = ""
         link = .idle
+        generation += 1
+        stopTriCaster()
         queue.async {
             self.target = ""
             self.timer?.cancel(); self.timer = nil
@@ -222,6 +292,15 @@ public final class ATEMClient: ObservableObject {
         guard !target.isEmpty else { return }
         let t = now()
         if t - lastInbound > 3 {
+            // A TriCaster that was off when we connected may have come up since.
+            if t - lastProbe > 6 {
+                lastProbe = t
+                let h = target
+                TriCasterLink.probe(h, port: Self.triCasterPort) { found in
+                    guard let found else { return }
+                    DispatchQueue.main.async { if self.host == h && self.tc == nil { self.startTriCaster(h, found) } }
+                }
+            }
             if t - lastHello > 1.5 {
                 setLink(.offline("No answer from \(target)"))
                 open()
@@ -420,23 +499,23 @@ public final class ATEMClient: ObservableObject {
     private func hl(_ v: Int) -> [UInt8] { let c = UInt16(clamping: max(0, v)); return [UInt8(c >> 8), UInt8(c & 0xFF)] }
     private func b(_ v: Int) -> UInt8 { UInt8(clamping: max(0, v)) }
 
-    public func setProgram(_ source: Int, me: Int = 0) { send("CPgI", [b(me), 0] + hl(source)) }
-    public func setPreview(_ source: Int, me: Int = 0) { send("CPvI", [b(me), 0] + hl(source)) }
-    public func cut(me: Int = 0) { send("DCut", [b(me), 0, 0, 0]) }
-    public func auto(me: Int = 0) { send("DAut", [b(me), 0, 0, 0]) }
+    public func setProgram(_ source: Int, me: Int = 0) { if let tc { tc.setProgram(source, me: me) } else { send("CPgI", [b(me), 0] + hl(source)) } }
+    public func setPreview(_ source: Int, me: Int = 0) { if let tc { tc.setPreview(source, me: me) } else { send("CPvI", [b(me), 0] + hl(source)) } }
+    public func cut(me: Int = 0) { if let tc { tc.cut(me: me) } else { send("DCut", [b(me), 0, 0, 0]) } }
+    public func auto(me: Int = 0) { if let tc { tc.auto(me: me) } else { send("DAut", [b(me), 0, 0, 0]) } }
     /// 0 to 1 from the start of the transition.
-    public func setPosition(_ v: Double, me: Int = 0) { send("CTPs", [b(me), 0] + hl(Int((min(1, max(0, v)) * 10000).rounded()))) }
-    public func setStyle(_ style: Int, me: Int = 0) { send("CTTp", [1, b(me), b(style), 0]) }
-    public func setNextSelection(_ mask: Int, me: Int = 0) { send("CTTp", [2, b(me), 0, b(max(1, mask))]) }
-    public func setMixRate(_ frames: Int, me: Int = 0) { send("CTMx", [b(me), b(min(250, max(1, frames))), 0, 0]) }
-    public func setKeyOnAir(_ keyer: Int, _ on: Bool, me: Int = 0) { send("CKOn", [b(me), b(keyer), on ? 1 : 0, 0]) }
-    public func setDSKOnAir(_ dsk: Int, _ on: Bool) { send("CDsL", [b(dsk), on ? 1 : 0, 0, 0]) }
-    public func setDSKTie(_ dsk: Int, _ on: Bool) { send("CDsT", [b(dsk), on ? 1 : 0, 0, 0]) }
-    public func dskAuto(_ dsk: Int) { send("DDsA", [b(dsk), 0, 0, 0]) }
-    public func fadeToBlack(me: Int = 0) { send("FtbA", [b(me), 0, 0, 0]) }
-    public func setAux(_ aux: Int, _ source: Int) { send("CAuS", [1, b(aux)] + hl(source)) }
-    public func runMacro(_ index: Int) { send("MAct", hl(index) + [0, 0]) }
-    public func stopMacro() { send("MAct", [0xFF, 0xFF, 1, 0]) }
-    public func setStreaming(_ on: Bool) { send("StrR", [on ? 1 : 0, 0, 0, 0]) }
-    public func setRecording(_ on: Bool) { send("RcTM", [on ? 1 : 0, 0, 0, 0]) }
+    public func setPosition(_ v: Double, me: Int = 0) { if let tc { tc.setPosition(v, me: me) } else { send("CTPs", [b(me), 0] + hl(Int((min(1, max(0, v)) * 10000).rounded()))) } }
+    public func setStyle(_ style: Int, me: Int = 0) { if let tc { tc.setStyle(style, me: me) } else { send("CTTp", [1, b(me), b(style), 0]) } }
+    public func setNextSelection(_ mask: Int, me: Int = 0) { if let tc { tc.setNextSelection(mask, me: me) } else { send("CTTp", [2, b(me), 0, b(max(1, mask))]) } }
+    public func setMixRate(_ frames: Int, me: Int = 0) { if let tc { tc.setMixRate(frames, me: me) } else { send("CTMx", [b(me), b(min(250, max(1, frames))), 0, 0]) } }
+    public func setKeyOnAir(_ keyer: Int, _ on: Bool, me: Int = 0) { if let tc { tc.setKeyOnAir(keyer, on, me: me) } else { send("CKOn", [b(me), b(keyer), on ? 1 : 0, 0]) } }
+    public func setDSKOnAir(_ dsk: Int, _ on: Bool) { if let tc { tc.setDSKOnAir(dsk, on) } else { send("CDsL", [b(dsk), on ? 1 : 0, 0, 0]) } }
+    public func setDSKTie(_ dsk: Int, _ on: Bool) { if let tc { tc.setDSKTie(dsk, on) } else { send("CDsT", [b(dsk), on ? 1 : 0, 0, 0]) } }
+    public func dskAuto(_ dsk: Int) { if let tc { tc.dskAuto(dsk) } else { send("DDsA", [b(dsk), 0, 0, 0]) } }
+    public func fadeToBlack(me: Int = 0) { if let tc { tc.fadeToBlack(me: me) } else { send("FtbA", [b(me), 0, 0, 0]) } }
+    public func setAux(_ aux: Int, _ source: Int) { if let tc { tc.setAux(aux, source) } else { send("CAuS", [1, b(aux)] + hl(source)) } }
+    public func runMacro(_ index: Int) { if let tc { tc.runMacro(index) } else { send("MAct", hl(index) + [0, 0]) } }
+    public func stopMacro() { if let tc { tc.stopMacro() } else { send("MAct", [0xFF, 0xFF, 1, 0]) } }
+    public func setStreaming(_ on: Bool) { if let tc { tc.setStreaming(on) } else { send("StrR", [on ? 1 : 0, 0, 0, 0]) } }
+    public func setRecording(_ on: Bool) { if let tc { tc.setRecording(on) } else { send("RcTM", [on ? 1 : 0, 0, 0, 0]) } }
 }

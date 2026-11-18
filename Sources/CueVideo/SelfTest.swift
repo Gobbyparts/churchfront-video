@@ -98,6 +98,40 @@ enum SelfTest {
             if only { steps = Array(steps.prefix(4)) } else { steps.removeFirst(4) }
             step(0)
         }
+        /// The same idea on a TriCaster: M/E 1 is Main, M/E 2 is the TriCaster's M/E 1, the
+        /// mix outputs are the aux. Settings read from shortcut_states can take two seconds
+        /// to show, so those steps wait longer. No fade to black (the TriCaster doesn't report
+        /// it), transition style or speed (not set from here), streaming or recording.
+        func beginTriCaster() {
+            let s = atem.state
+            let p1 = s.program[0] ?? 0, v1 = s.preview[0] ?? 0
+            let rate = s.mixRate[0] ?? 60
+            let tie1 = s.dskTie[0] ?? false, dsk1 = s.dskOnAir[0] ?? false, key2 = s.keyOnAir[1]?[1] ?? false
+            let mix3 = s.aux[2] ?? 10011
+            let camA = s.busSources.first { $0.isExternal && $0.id != p1 }?.id ?? 2
+            log("start: Main program \(s.name(p1)) preview \(s.name(v1)); test camera \(s.name(camA))")
+            steps = [
+                ("Main preview to \(s.name(camA))", 0.6, { atem.setPreview(camA, me: 0) }, { $0.preview[0] == camA }),
+                ("Main cut", 0.8, { atem.cut(me: 0) }, { $0.program[0] == camA && $0.preview[0] == p1 }),
+                ("Main cut back", 0.8, { atem.cut(me: 0) }, { $0.program[0] == p1 && $0.preview[0] == camA }),
+                ("Main auto", Double(rate) / 30 + 1, { atem.auto(me: 0) }, { $0.program[0] == camA && $0.inTransition[0] != true }),
+                ("Main auto back", Double(rate) / 30 + 1, { atem.auto(me: 0) }, { $0.program[0] == p1 && $0.inTransition[0] != true }),
+                ("T-bar halfway", 0.8, { atem.setPosition(0.5, me: 0) }, { $0.inTransition[0] == true }),
+                ("T-bar all the way", 1, { atem.setPosition(1.0, me: 0) }, { $0.program[0] == camA && $0.inTransition[0] != true }),
+                ("T-bar home", 1, { atem.setPosition(0, me: 0) }, { $0.inTransition[0] != true }),
+                ("cut back after T-bar", 0.8, { if atem.state.program[0] != p1 { atem.cut(me: 0) } }, { $0.program[0] == p1 }),
+                ("preview back", 0.6, { atem.setPreview(v1, me: 0) }, { $0.preview[0] == v1 }),
+                ("DSK 1 tie", 3, { atem.setDSKTie(0, !tie1) }, { $0.dskTie[0] == !tie1 }),
+                ("DSK 1 tie back", 3, { atem.setDSKTie(0, tie1) }, { $0.dskTie[0] == tie1 }),
+                ("DSK 1 auto", 2.5, { atem.dskAuto(0) }, { $0.dskOnAir[0] == !dsk1 && $0.dskInTransition[0] != true }),
+                ("DSK 1 auto back", 2.5, { atem.dskAuto(0) }, { $0.dskOnAir[0] == dsk1 && $0.dskInTransition[0] != true }),
+                ("M/E 1 key 2 on", 1, { atem.setKeyOnAir(1, !key2, me: 1) }, { $0.keyOnAir[1]?[1] == !key2 }),
+                ("M/E 1 key 2 back", 1, { atem.setKeyOnAir(1, key2, me: 1) }, { $0.keyOnAir[1]?[1] == key2 }),
+                ("mix 3 output to Program", 3, { atem.setAux(2, 10010) }, { $0.aux[2] == 10010 }),
+                ("mix 3 output back", 3, { atem.setAux(2, mix3) }, { $0.aux[2] == mix3 }),
+            ]
+            step(0)
+        }
         func step(_ i: Int) {
             guard i < steps.count else {
                 let s = atem.state
@@ -117,7 +151,7 @@ enum SelfTest {
         }
         func wait() {
             if atem.link == .online && !atem.state.inputs.isEmpty {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: begin)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: atem.kind == .tricaster ? beginTriCaster : begin)
             } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: wait) }
         }
         wait()
