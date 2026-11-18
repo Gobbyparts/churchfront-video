@@ -47,6 +47,7 @@ const char *ndi_load(void) {
         "/Library/NDI/libndi.dylib",
         // NDI Tools 6 ships no shared runtime on the Mac, only copies inside its own apps.
         "/Applications/NDI Scan Converter.app/Contents/Frameworks/libndi.dylib",
+        "/Applications/NDI Launcher.app/Contents/Frameworks/libndi.dylib",
         "/Library/CoreMediaIO/Plug-Ins/DAL/NDIVideoOut.plugin/Contents/Frameworks/libndi.dylib",
         "/Applications/NDI Router.app/Contents/Frameworks/NTFramework.framework/Versions/A/Frameworks/libndi.dylib",
         "/Applications/NDI Video Monitor.app/Contents/Frameworks/libndi_advanced.dylib",

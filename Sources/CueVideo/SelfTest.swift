@@ -12,6 +12,8 @@ enum SelfTest {
         let atem = Booth.shared.atem
         let out = ProcessInfo.processInfo.environment["CUEVIDEO_SNAPSHOT"]
         func log(_ s: String) { print("PROBE", s); fflush(stdout) }
+        // The configured cameras, for the picture: the probe only reads, so it never moves them.
+        Booth.shared.ptz.cameras = Booth.shared.store.config.cameras
         func check() {
             guard atem.link == .online, !atem.state.inputs.isEmpty else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: check); return
@@ -54,6 +56,7 @@ enum SelfTest {
         var passed = 0, failed = 0
         typealias Step = (name: String, wait: Double, act: () -> Void, check: (ATEMState) -> Bool)
         var steps: [Step] = []
+        var lastRate: Int?
 
         func begin() {
             let s = atem.state
@@ -100,8 +103,8 @@ enum SelfTest {
         }
         /// The same idea on a TriCaster: M/E 1 is Main, M/E 2 is the TriCaster's M/E 1, the
         /// mix outputs are the aux. Settings read from shortcut_states can take two seconds
-        /// to show, so those steps wait longer. No fade to black (the TriCaster doesn't report
-        /// it), transition style or speed (not set from here), streaming or recording.
+        /// to show, so those steps wait longer (fade to black too: it shows only there). No
+        /// transition style or speed (not set from here), streaming or recording.
         func beginTriCaster() {
             let s = atem.state
             let p1 = s.program[0] ?? 0, v1 = s.preview[0] ?? 0
@@ -129,6 +132,8 @@ enum SelfTest {
                 ("M/E 1 key 2 back", 1, { atem.setKeyOnAir(1, key2, me: 1) }, { $0.keyOnAir[1]?[1] == key2 }),
                 ("mix 3 output to Program", 3, { atem.setAux(2, 10010) }, { $0.aux[2] == 10010 }),
                 ("mix 3 output back", 3, { atem.setAux(2, mix3) }, { $0.aux[2] == mix3 }),
+                ("fade to black", 8, { atem.fadeToBlack(me: 0) }, { $0.ftbBlack[0] == true }),
+                ("fade back up", 8, { atem.fadeToBlack(me: 0) }, { $0.ftbBlack[0] == false }),
             ]
             step(0)
         }
@@ -145,6 +150,8 @@ enum SelfTest {
                 let ok = st.check(atem.state)
                 if ok { passed += 1 } else { failed += 1 }
                 let a = atem.state
+                // A step that changes the transition speed is a side effect worth knowing about.
+                if let r = a.mixRate[0], r != lastRate { log("transition speed now \(r) frames, after \(st.name)"); lastRate = r }
                 log("\(ok ? "PASS" : "FAIL") \(st.name)" + (ok ? "" : "  [program \(a.name(a.program[0])) preview \(a.name(a.preview[0])) in transition \(a.inTransition[0] ?? false) black \(a.ftbBlack[0] ?? false) fading \(a.ftbInTransition[0] ?? false)]"))
                 step(i + 1)
             }

@@ -165,8 +165,8 @@ public struct TriCasterDictionaries {
                 s.dskTie[i] = ties.contains("main_dsk\(i + 1)")
                 if let src = source(D.attr(o, "source")) { s.dskFill[i] = src; s.dskCut[i] = src }
             }
-            // TriCaster has no fade-to-black state in its dictionaries; Main's FTB is shown off.
-            s.ftbBlack[0] = false
+            // Faded to black shows only as the FTB button blinking.
+            s.ftbBlack[0] = states["main_ftb_blink"] == "true"
         }
 
         // The TriCaster's M/Es: programs, previews and keys.
@@ -203,7 +203,7 @@ public struct TriCasterDictionaries {
         }
         for (i, m) in macros.enumerated() { s.macros[i] = m.name }
         if let v = states["streaming_toggle"] { s.hasStreaming = true; s.streamStatus = Self.isOn(v) ? 4 : 0 }
-        if let v = states["record_toggle"] { s.hasRecording = true; s.recordStatus = Self.isOn(v) ? 1 : 0 }
+        if let v = states["record_toggle"] { s.hasRecording = true; s.recordStatus = (Int(v) ?? 0) > 0 || v == "true" ? 1 : 0 }
 
         for c in D.elements(tally, "//column") {
             guard let n = D.attr(c, "name"), let id = TriCasterSource.id(n), id < 10000 else { continue }
@@ -471,16 +471,10 @@ final class TriCasterLink {
     /// Keys on the TriCaster's M/Es; Main has none of its own (its overlays are DSKs).
     func setKeyOnAir(_ keyer: Int, _ on: Bool, me: Int) {
         guard me > 0 else { return setDSKOnAir(keyer, on) }
-        withState { s in
-            guard (s.keyOnAir[me]?[keyer] ?? false) != on else { return }
-            self.shortcut("\(self.p(me))_dsk\(keyer + 1)_take", nil, "Key \(keyer + 1) \(on ? "on" : "off"), \(self.meName(me))")
-        }
+        shortcut("\(p(me))_dsk\(keyer + 1)_value", on ? "1" : "0", "Key \(keyer + 1) \(on ? "on" : "off"), \(meName(me))")
     }
     func setDSKOnAir(_ dsk: Int, _ on: Bool) {
-        withState { s in
-            guard (s.dskOnAir[dsk] ?? false) != on else { return }
-            self.shortcut("main_dsk\(dsk + 1)_take", nil, "DSK \(dsk + 1) \(on ? "on" : "off")")
-        }
+        shortcut("main_dsk\(dsk + 1)_value", on ? "1" : "0", "DSK \(dsk + 1) \(on ? "on" : "off")")
     }
     func dskAuto(_ dsk: Int) { shortcut("main_dsk\(dsk + 1)_auto", nil, "DSK \(dsk + 1) auto") }
     func fadeToBlack(me: Int) { shortcut("\(p(me))_ftb_auto", nil, "Fade to black, \(meName(me))") }
@@ -495,17 +489,9 @@ final class TriCasterLink {
             self.shortcut("play_macro_byid", m.id, "Run macro \(m.name)")
         }
     }
-    func stopMacro() { shortcut("stop_all_macros", nil, "Stop macros") }
-    func setStreaming(_ on: Bool) {
-        withState { s in
-            guard s.streaming != on else { return }
-            self.shortcut("streaming_toggle", nil, "Streaming \(on ? "start" : "stop")")
-        }
-    }
-    func setRecording(_ on: Bool) {
-        withState { s in
-            guard s.recording != on else { return }
-            self.shortcut("record_toggle", nil, "Recording \(on ? "start" : "stop")")
-        }
-    }
+    /// The API has no way to stop a running macro.
+    func stopMacro() { queue.async { self.onLog(ATEMLogEntry(time: Date(), command: "Stop macro: stop it on the TriCaster", data: [], sent: false)) } }
+    /// The toggles take 1 to start and 0 to stop, so a repeat can't flip it back.
+    func setStreaming(_ on: Bool) { shortcut("streaming_toggle", on ? "1" : "0", "Streaming \(on ? "start" : "stop")") }
+    func setRecording(_ on: Bool) { shortcut("record_toggle", on ? "1" : "0", "Recording \(on ? "start" : "stop")") }
 }
